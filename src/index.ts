@@ -6,7 +6,7 @@ import { PumpDetector, type PumpAlert } from './detector';
 import { BinanceMiniTickerClient, type MiniTicker } from './binance';
 import { createTelegramSender, formatAlertMessage } from './telegram';
 
-const BINANCE_STREAM_URL = 'wss://stream.binance.com:9443/ws/!miniTicker@arr';
+const DEFAULT_BINANCE_STREAM_URL = 'wss://stream.binance.com:9443/ws/!miniTicker@arr';
 const ALERTS_FILE = path.resolve(process.cwd(), 'data', 'alerts.jsonl');
 
 function main(): void {
@@ -111,7 +111,7 @@ function main(): void {
   }
 
   const client = new BinanceMiniTickerClient({
-    url: BINANCE_STREAM_URL,
+    url: cfg.binanceWsUrl ?? DEFAULT_BINANCE_STREAM_URL,
     logger,
     onTicker: handleTicker,
   });

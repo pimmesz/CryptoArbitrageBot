@@ -12,6 +12,8 @@ export interface Config {
   quoteCurrency: string;
   excludeSuffixes: string[];
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  /** Optional override of the Binance WS URL. Useful for testing reconnect paths. */
+  binanceWsUrl?: string;
 }
 
 class ConfigError extends Error {
@@ -63,6 +65,7 @@ export function loadConfig(): Config {
       .map((s) => s.trim().toUpperCase())
       .filter((s) => s.length > 0),
     logLevel: parseLogLevel(requireString('LOG_LEVEL')),
+    binanceWsUrl: process.env.BINANCE_WS_URL?.trim() || undefined,
   };
   return cfg;
 }
