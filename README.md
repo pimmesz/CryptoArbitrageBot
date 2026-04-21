@@ -54,6 +54,9 @@ the `.env` file itself is gitignored.
 | `LOG_LEVEL`           | `debug` \| `info` \| `warn` \| `error`. Default `info`.  |
 | `BLOX_COINS_URL`      | Blox coin-list page used for filtering. Default is production. |
 | `BLOX_REFRESH_HOURS`  | Refresh cadence for the Blox list. Default `6`.          |
+| `MIN_ELAPSED_SECONDS` | Minimum elapsed time between the window's min price and the firing tick. Default `0`. |
+| `TELEGRAM_RATE_LIMIT_PER_SEC` | Max Telegram messages/sec (Telegram's chat limit is 30/s). Default `20`. |
+| `SILENCE_TIMEOUT_SECONDS` | WS silence watchdog: reconnect if no ticks arrive in this window. Default `30`. |
 
 Invalid or missing values cause the process to fail fast on startup with a
 clear error.

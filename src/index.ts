@@ -2,10 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadConfig } from './config';
 import { createLogger } from './logger';
-import { PumpDetector, type PumpAlert } from './detector';
+import { PumpDetector } from './detector';
 import { BinanceMiniTickerClient, type MiniTicker } from './binance';
 import { createTelegramSender, formatAlertMessage } from './telegram';
 import { BloxDirectory } from './blox';
+import { createAlertEmitter } from './alert-emitter';
 
 const DEFAULT_BINANCE_STREAM_URL = 'wss://stream.binance.com:9443/ws/!miniTicker@arr';
 const ALERTS_FILE = path.resolve(process.cwd(), 'data', 'alerts.jsonl');
@@ -18,9 +19,12 @@ async function main(): Promise<void> {
     thresholdPct: cfg.pumpThresholdPct,
     windowSeconds: cfg.windowSeconds,
     cooldownMinutes: cfg.cooldownMinutes,
+    minElapsedSeconds: cfg.minElapsedSeconds,
     quote: cfg.quoteCurrency,
     excludeSuffixes: cfg.excludeSuffixes,
     bloxRefreshHours: cfg.bloxRefreshHours,
+    telegramRateLimitPerSec: cfg.telegramRateLimitPerSec,
+    silenceTimeoutSeconds: cfg.silenceTimeoutSeconds,
     nodeVersion: process.version,
   });
 
@@ -38,12 +42,14 @@ async function main(): Promise<void> {
     cooldownMs: cfg.cooldownMinutes * 60_000,
     // ~1 tick/s × 60s = 60 entries; cap at 2x headroom to stay safe.
     maxBufferEntries: 120,
+    minElapsedMs: cfg.minElapsedSeconds * 1_000,
   });
 
   const sendTelegram = createTelegramSender({
     botToken: cfg.telegramBotToken,
     chatId: cfg.telegramChatId,
     logger,
+    rateLimitPerSec: cfg.telegramRateLimitPerSec,
   });
 
   const blox = new BloxDirectory({
@@ -57,15 +63,42 @@ async function main(): Promise<void> {
   await blox.start();
   logger.info('blox.ready', { size: blox.size() });
 
-  // Heartbeat so pm2 logs show signs of life even when no alerts fire.
+  // Counters for the heartbeat; reset every tick.
   let ticksSinceHeartbeat = 0;
+  let alertsSinceHeartbeat = 0;
+  let suppressedSinceHeartbeat = 0;
+
+  const appendAlertRecord = (line: string): Promise<void> =>
+    fs.promises.appendFile(ALERTS_FILE, line, 'utf8');
+
+  const emitAlert = createAlertEmitter({
+    blox,
+    quoteCurrency: cfg.quoteCurrency,
+    sendTelegram,
+    formatAlertMessage,
+    appendAlertRecord,
+    logger,
+    onEmitted: () => {
+      alertsSinceHeartbeat++;
+    },
+    onSuppressed: () => {
+      suppressedSinceHeartbeat++;
+    },
+  });
+
+  // Heartbeat so pm2 logs show signs of life even when no alerts fire.
   const heartbeat = setInterval(() => {
     logger.info('heartbeat', {
       trackedSymbols: detector.trackedSymbols(),
       ticksLast60s: ticksSinceHeartbeat,
       bloxCoins: blox.size(),
+      alertsLast60s: alertsSinceHeartbeat,
+      suppressedLast60s: suppressedSinceHeartbeat,
+      telegramConsecutiveFailures: sendTelegram.consecutiveFailures(),
     });
     ticksSinceHeartbeat = 0;
+    alertsSinceHeartbeat = 0;
+    suppressedSinceHeartbeat = 0;
   }, 60_000);
   heartbeat.unref();
 
@@ -93,65 +126,11 @@ async function main(): Promise<void> {
     if (alert) emitAlert(alert);
   }
 
-  function emitAlert(alert: PumpAlert): void {
-    // Base ticker: 'BTCUSDT' → 'BTC'. We use it to look up the Blox entry.
-    const base = alert.symbol.endsWith(cfg.quoteCurrency)
-      ? alert.symbol.slice(0, -cfg.quoteCurrency.length)
-      : alert.symbol;
-    const tradeUrl = blox.getTradeUrl(base);
-    const onBlox = tradeUrl !== null;
-
-    const record = {
-      ts: new Date(alert.ts).toISOString(),
-      event: 'pump_alert',
-      symbol: alert.symbol,
-      base,
-      fromPrice: alert.fromPrice,
-      toPrice: alert.toPrice,
-      changePct: Number(alert.changePct.toFixed(4)),
-      elapsedMs: alert.elapsedMs,
-      onBlox,
-      tradeUrl: tradeUrl ?? undefined,
-    };
-    logger.info('pump_alert', record);
-
-    // Append to JSONL on disk. Sync write keeps ordering simple; file is tiny.
-    try {
-      fs.appendFileSync(ALERTS_FILE, JSON.stringify(record) + '\n', 'utf8');
-    } catch (err) {
-      logger.error('alerts_file.write_failed', {
-        error: (err as Error).message,
-      });
-    }
-
-    // Gate Telegram sends to coins actually available on Blox, so every
-    // alert that lands on the phone is immediately actionable.
-    if (!onBlox || !tradeUrl) {
-      logger.debug('pump_alert.suppressed_not_on_blox', { symbol: alert.symbol });
-      return;
-    }
-
-    const text = formatAlertMessage({
-      symbol: alert.symbol,
-      fromPrice: alert.fromPrice,
-      toPrice: alert.toPrice,
-      changePct: alert.changePct,
-      elapsedMs: alert.elapsedMs,
-      tradeUrl,
-    });
-    // Don't await — we must not block the read loop on Telegram latency.
-    sendTelegram(text).catch((err: Error) => {
-      logger.warn('telegram.send_failed', {
-        symbol: alert.symbol,
-        error: err.message,
-      });
-    });
-  }
-
   const client = new BinanceMiniTickerClient({
     url: cfg.binanceWsUrl ?? DEFAULT_BINANCE_STREAM_URL,
     logger,
     onTicker: handleTicker,
+    silenceTimeoutMs: cfg.silenceTimeoutSeconds * 1_000,
   });
 
   process.on('unhandledRejection', (reason: unknown) => {

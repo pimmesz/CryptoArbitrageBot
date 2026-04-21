@@ -1,3 +1,4 @@
+import * as cheerio from 'cheerio';
 import type { Logger } from '../logger';
 import { STATIC_BLOX_COINS } from './coins';
 
@@ -158,21 +159,21 @@ export class BloxDirectory {
 /**
  * Parse the Blox cryptocurrency-coins HTML and return a ticker → slug map.
  *
- * The page renders each coin as a card with a link like
- *   <a href="/nl-nl/bitcoin">...</a>
- * closely followed by text such as
- *   <span>Bitcoin</span><span>Bitcoin (BTC) is ...</span>
- *
  * Strategy:
- *   - Collect every `/nl-nl/<slug>` href in the document, in order, skipping
- *     variant suffixes (-kopen, -koers, -voor-dummies, etc) and a small
- *     hand-maintained blocklist of non-coin pages that tend to show up first
- *     inside the card markup.
- *   - Collect every `(TICKER)` occurrence, in order, where TICKER looks like
- *     a coin symbol.
- *   - For each ticker, the nearest preceding slug href (by document
- *     position) is its match. First-seen ticker wins if the same ticker
- *     appears again later in body copy.
+ *   - Parse with cheerio; walk the DOM in document order.
+ *   - For each element:
+ *       - If it's `<a href="/nl-nl/<slug>">` and the slug looks coin-ish
+ *         (not a `-kopen` variant, not a known editorial page), emit a
+ *         'link' event.
+ *       - For every text node, scan for the coin-marker pattern
+ *         `Name (TICKER)` — we require a capital-leading word before the
+ *         parenthesized ticker so parenthetical abbreviations in body
+ *         copy (e.g. "exchange (DEX)", "intelligence (AI)") don't match.
+ *   - Pair each ticker with the nearest preceding link. First-seen ticker
+ *     wins so body-copy `(BTC)` mentions further down the page don't
+ *     reassign. This mirrors the previous regex parser's semantics — the
+ *     DOM walk just makes it resilient to HTML formatting changes that
+ *     would have shifted string offsets.
  *
  * Exported for unit testing.
  */
@@ -201,40 +202,63 @@ export function parseBloxCoinsHtml(html: string): Map<string, string> {
     'nieuws',
     'blog',
   ]);
-
-  // 1. All candidate slug hrefs with their document positions.
-  const slugPositions: Array<{ pos: number; slug: string }> = [];
-  const hrefRe = /href="\/nl-nl\/([a-z0-9][a-z0-9.-]*?)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = hrefRe.exec(html)) !== null) {
-    const slug = m[1]!;
-    if (bannedSlugs.has(slug)) continue;
-    if (bannedSlugSuffixes.some((s) => slug.endsWith(s))) continue;
-    slugPositions.push({ pos: m.index, slug });
-  }
-
-  // 2. All `(TICKER)` occurrences. Require a preceding capital-letter word
-  // (name like "Bitcoin") to avoid matching things like "(DEX)" inside prose.
+  const slugShape = /^[a-z0-9][a-z0-9.-]*$/;
+  // Name (TICKER) — capital-leading preceding name avoids common false
+  // positives like "(DEX)" / "(AI)" in body prose.
   const tickerRe = /(?:[A-Z][A-Za-z][A-Za-z .'-]{1,40}?) \(([A-Z][A-Z0-9]{1,9})\)/g;
-  const tickerPositions: Array<{ pos: number; ticker: string }> = [];
-  while ((m = tickerRe.exec(html)) !== null) {
-    tickerPositions.push({ pos: m.index, ticker: m[1]! });
+
+  type Event = { kind: 'link'; slug: string } | { kind: 'ticker'; symbol: string };
+  const events: Event[] = [];
+
+  function isSlugAcceptable(slug: string): boolean {
+    if (!slug) return false;
+    if (bannedSlugs.has(slug)) return false;
+    if (bannedSlugSuffixes.some((s) => slug.endsWith(s))) return false;
+    return slugShape.test(slug);
   }
 
-  // 3. Pair each ticker with the nearest preceding slug (first-seen wins).
+  type Node = {
+    type?: string;
+    name?: string;
+    data?: string;
+    attribs?: Record<string, string>;
+    children?: Node[];
+  };
+
+  function walk(node: Node): void {
+    if (node.type === 'tag' && node.name === 'a') {
+      const href = node.attribs?.href;
+      if (href && href.startsWith('/nl-nl/')) {
+        const slug = href.replace(/^\/nl-nl\//, '').replace(/[/#?].*$/, '');
+        if (isSlugAcceptable(slug)) {
+          events.push({ kind: 'link', slug });
+        }
+      }
+    } else if (node.type === 'text' && typeof node.data === 'string') {
+      tickerRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = tickerRe.exec(node.data)) !== null) {
+        events.push({ kind: 'ticker', symbol: m[1]! });
+      }
+    }
+    const children = node.children;
+    if (children) {
+      for (const c of children) walk(c);
+    }
+  }
+
+  const $ = cheerio.load(html);
+  const root = $.root()[0] as unknown as Node | undefined;
+  if (root) walk(root);
+
   const out = new Map<string, string>();
-  let slugCursor = 0;
   let lastSlug: string | null = null;
-  for (const t of tickerPositions) {
-    while (slugCursor < slugPositions.length && slugPositions[slugCursor]!.pos < t.pos) {
-      lastSlug = slugPositions[slugCursor]!.slug;
-      slugCursor++;
-    }
-    if (!lastSlug) continue;
-    if (!out.has(t.ticker)) {
-      out.set(t.ticker, lastSlug);
+  for (const e of events) {
+    if (e.kind === 'link') {
+      lastSlug = e.slug;
+    } else if (lastSlug && !out.has(e.symbol)) {
+      out.set(e.symbol, lastSlug);
     }
   }
-
   return out;
 }

@@ -135,6 +135,26 @@ describe('PumpDetector', () => {
     });
   });
 
+  describe('minElapsedMs gate', () => {
+    it('suppresses alerts where the min→current elapsed is below the floor', () => {
+      const d = new PumpDetector({ ...baseOpts, minElapsedMs: 15_000 });
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 5_000; // 5s — below floor
+      expect(d.observe('BTCUSDT', 103, now)).toBeNull();
+    });
+
+    it('fires once the elapsed floor is crossed', () => {
+      const d = new PumpDetector({ ...baseOpts, minElapsedMs: 15_000 });
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 20_000; // 20s — above floor
+      const alert = d.observe('BTCUSDT', 103, now);
+      expect(alert).not.toBeNull();
+      expect(alert?.elapsedMs).toBe(20_000);
+    });
+  });
+
   describe('bad input handling', () => {
     it('ignores non-finite or non-positive prices', () => {
       const d = new PumpDetector(baseOpts);

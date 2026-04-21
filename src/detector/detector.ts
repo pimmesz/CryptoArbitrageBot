@@ -13,6 +13,14 @@ export interface DetectorOptions {
   cooldownMs: number;
   /** Hard cap on entries per symbol buffer — defense against OOM bugs. */
   maxBufferEntries: number;
+  /**
+   * Optional floor on how long the pump must have been building. Prevents
+   * a single spiky tick from tripping the threshold on its first recorded
+   * comparison. Default 0 (no floor).
+   *
+   * Concretely: the min→current elapsed must be >= minElapsedMs.
+   */
+  minElapsedMs?: number;
 }
 
 interface PricePoint {
@@ -42,11 +50,17 @@ export class PumpDetector {
   private readonly buffers = new Map<string, PricePoint[]>();
   private readonly cooldownUntil = new Map<string, number>();
 
+  private readonly minElapsedMs: number;
+
   constructor(private readonly opts: DetectorOptions) {
     if (opts.windowMs <= 0) throw new Error('windowMs must be > 0');
     if (opts.thresholdPct <= 0) throw new Error('thresholdPct must be > 0');
     if (opts.cooldownMs < 0) throw new Error('cooldownMs must be >= 0');
     if (opts.maxBufferEntries < 2) throw new Error('maxBufferEntries must be >= 2');
+    if (opts.minElapsedMs !== undefined && opts.minElapsedMs < 0) {
+      throw new Error('minElapsedMs must be >= 0');
+    }
+    this.minElapsedMs = opts.minElapsedMs ?? 0;
   }
 
   /**
@@ -86,15 +100,16 @@ export class PumpDetector {
 
     const changeRatio = price / minPoint.price - 1;
     const threshold = this.opts.thresholdPct / 100;
+    const elapsedMs = now - minPoint.ts;
 
-    if (changeRatio >= threshold) {
+    if (changeRatio >= threshold && elapsedMs >= this.minElapsedMs) {
       this.cooldownUntil.set(symbol, now + this.opts.cooldownMs);
       return {
         symbol,
         fromPrice: minPoint.price,
         toPrice: price,
         changePct: changeRatio * 100,
-        elapsedMs: now - minPoint.ts,
+        elapsedMs,
         ts: now,
       };
     }
