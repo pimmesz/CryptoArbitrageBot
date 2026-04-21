@@ -14,6 +14,10 @@ export interface Config {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   /** Optional override of the Binance WS URL. Useful for testing reconnect paths. */
   binanceWsUrl?: string;
+  /** URL of the Blox all-coins page (scraped for the supported-asset list). */
+  bloxCoinsUrl: string;
+  /** How often to refresh the Blox coin list, in hours. */
+  bloxRefreshHours: number;
 }
 
 class ConfigError extends Error {
@@ -66,8 +70,30 @@ export function loadConfig(): Config {
       .filter((s) => s.length > 0),
     logLevel: parseLogLevel(requireString('LOG_LEVEL')),
     binanceWsUrl: process.env.BINANCE_WS_URL?.trim() || undefined,
+    bloxCoinsUrl:
+      process.env.BLOX_COINS_URL?.trim() ||
+      'https://weareblox.com/nl-nl/cryptocurrency-coins',
+    bloxRefreshHours: optionalNumber('BLOX_REFRESH_HOURS', 6, (n) => n > 0, 'must be > 0'),
   };
   return cfg;
+}
+
+function optionalNumber(
+  key: string,
+  fallback: number,
+  predicate: (n: number) => boolean,
+  constraintMsg: string,
+): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new ConfigError(`${key} must be a number, got "${raw}"`);
+  }
+  if (!predicate(n)) {
+    throw new ConfigError(`${key}=${n} ${constraintMsg}`);
+  }
+  return n;
 }
 
 export { ConfigError };

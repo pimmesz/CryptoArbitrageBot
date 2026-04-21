@@ -15,6 +15,11 @@ No trading, no API keys, no money at risk. Pure market-data-in, Telegram-message
 - Keeps a rolling 60-second price buffer per symbol and fires an alert when the
   current price is ≥ 2% above the minimum price in that window.
 - Enforces a 15-minute per-symbol cooldown so a single pump doesn't spam the channel.
+- Cross-checks each alert against the coins available on
+  [Blox](https://weareblox.com/). **Only** alerts whose asset is tradeable on
+  Blox get forwarded to Telegram; the link in the message points at the Blox
+  coin page so tapping it opens the Blox app directly (via universal link).
+  Alerts for non-Blox assets are still logged locally for analysis.
 - Logs each alert as a JSON line to stdout (PM2 captures it) and appends it to
   `./data/alerts.jsonl` for later analysis.
 - Auto-reconnects the WebSocket with exponential backoff (1s → 60s, resets after
@@ -26,8 +31,11 @@ No trading, no API keys, no money at risk. Pure market-data-in, Telegram-message
 ```
 🚀 BTCUSDT +2.34% in 58s
 67420.15 → 69000.00
-https://www.binance.com/en/trade/BTC_USDT
+https://weareblox.com/nl-nl/bitcoin
 ```
+
+Tapping the link on mobile opens the Blox app (via universal link) directly on
+the asset's trading page. On desktop it opens the same page in the browser.
 
 ## Environment variables
 
@@ -44,6 +52,8 @@ the `.env` file itself is gitignored.
 | `QUOTE_CURRENCY`      | Only watch pairs ending in this. Default `USDT`.         |
 | `EXCLUDE_SUFFIXES`    | Comma-separated suffix blocklist (leveraged tokens).     |
 | `LOG_LEVEL`           | `debug` \| `info` \| `warn` \| `error`. Default `info`.  |
+| `BLOX_COINS_URL`      | Blox coin-list page used for filtering. Default is production. |
+| `BLOX_REFRESH_HOURS`  | Refresh cadence for the Blox list. Default `6`.          |
 
 Invalid or missing values cause the process to fail fast on startup with a
 clear error.
