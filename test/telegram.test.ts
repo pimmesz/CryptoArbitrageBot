@@ -166,12 +166,12 @@ describe('formatAlertMessage', () => {
       toPrice: 69000,
       changePct: 2.342,
       elapsedMs: 58_000,
-      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+      tradeUrl: 'https://app.weareblox.com/markets/BTC',
     });
     const lines = msg.split('\n');
     expect(lines[0]).toBe('🚀 BTCUSDT +2.34% in 58s');
     expect(lines[1]).toContain('→');
-    expect(lines[2]).toBe('https://weareblox.com/nl-nl/bitcoin');
+    expect(lines[2]).toBe('https://app.weareblox.com/markets/BTC');
   });
 
   it('floors elapsed at 1 second', () => {
@@ -196,13 +196,13 @@ describe('formatAlertMessage', () => {
       tierPct: 10,
       // 4 minutes 30 seconds since the initial alert
       elapsedMs: 4 * 60_000 + 30_000,
-      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+      tradeUrl: 'https://app.weareblox.com/markets/BTC',
     });
     const lines = msg.split('\n');
     expect(lines[0]).toBe('📈 BTCUSDT now +12.00% (passed +10%)');
     expect(lines[1]).toContain('→');
     expect(lines[1]).toContain('4 min 30s since first alert');
-    expect(lines[2]).toBe('https://weareblox.com/nl-nl/bitcoin');
+    expect(lines[2]).toBe('https://app.weareblox.com/markets/BTC');
   });
 
   it('uses second-only elapsed for sub-minute escalations and clean minutes for whole-minute deltas', () => {

@@ -23,9 +23,12 @@ No trading, no API keys, no money at risk. Pure market-data-in, Telegram-message
   "+2% alert then radio silence even as the coin rips to +10%" problem.
 - Cross-checks each alert against the coins available on
   [Blox](https://weareblox.com/). **Only** alerts whose asset is tradeable on
-  Blox get forwarded to Telegram; the link in the message points at the Blox
-  coin page so tapping it opens the Blox app directly (via universal link).
-  Alerts for non-Blox assets are still logged locally for analysis.
+  Blox get forwarded to Telegram; the link in the message points at the
+  Blox app's market page (`https://app.weareblox.com/markets/<TICKER>`) —
+  this is a universal-link / Android App Link domain, so tapping it on
+  mobile opens the Blox app directly on that coin's trading screen, with a
+  graceful fallback to the same page in-browser on desktop. Alerts for
+  non-Blox assets are still logged locally for analysis.
 - Logs each alert as a JSON line to stdout (PM2 captures it) and appends it to
   `./data/alerts.jsonl` for later analysis.
 - Auto-reconnects the WebSocket with exponential backoff (1s → 60s, resets after
@@ -39,7 +42,7 @@ Initial alert:
 ```
 🚀 BTCUSDT +2.34% in 58s
 67420.15 → 69000.00
-https://weareblox.com/nl-nl/bitcoin
+https://app.weareblox.com/markets/BTC
 ```
 
 Escalation alert (same pump, price has since crossed the +10% tier):
@@ -47,7 +50,7 @@ Escalation alert (same pump, price has since crossed the +10% tier):
 ```
 📈 BTCUSDT now +11.20% (passed +10%)
 67420.15 → 74972.00 (4 min 30s since first alert)
-https://weareblox.com/nl-nl/bitcoin
+https://app.weareblox.com/markets/BTC
 ```
 
 Tapping the link on mobile opens the Blox app (via universal link) directly on

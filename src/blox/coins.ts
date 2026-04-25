@@ -10,8 +10,12 @@
  * Snapshot taken: 2026-04-21. If the live fetch keeps failing, refresh
  * manually by re-running the scraper or updating this file.
  *
- * Each entry maps a ticker (uppercase) to the URL slug used in
- * `https://weareblox.com/nl-nl/{slug}`.
+ * Each entry maps a ticker (uppercase) to the marketing-site URL slug used
+ * by the live-page parser at `https://weareblox.com/nl-nl/{slug}`. The slug
+ * is NOT used to build user-facing trade links — those go to the app
+ * domain at `https://app.weareblox.com/markets/{TICKER}` (a universal link
+ * that opens the Blox app on mobile). The slug map is purely the parse key
+ * and the "is this coin on Blox" gate.
  */
 export const STATIC_BLOX_COINS: Readonly<Record<string, string>> = Object.freeze({
   BTC: 'bitcoin',

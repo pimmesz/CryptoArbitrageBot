@@ -47,7 +47,7 @@ function makeDeps(bloxMap: Record<string, string>) {
         : `msg for ${a.symbol} @ ${a.tradeUrl}`,
   );
   const blox = {
-    getTradeUrl: (t: string) => (bloxMap[t] ? `https://weareblox.com/nl-nl/${bloxMap[t]}` : null),
+    getTradeUrl: (t: string) => (bloxMap[t] ? `https://app.weareblox.com/markets/${t.toUpperCase()}` : null),
   };
   const onEmitted = vi.fn();
   const onSuppressed = vi.fn();
@@ -66,7 +66,7 @@ describe('createAlertEmitter', () => {
     emit(makeAlert());
 
     expect(deps.sendTelegram).toHaveBeenCalledTimes(1);
-    expect(deps.sendTelegram.mock.calls[0]![0]).toContain('https://weareblox.com/nl-nl/bitcoin');
+    expect(deps.sendTelegram.mock.calls[0]![0]).toContain('https://app.weareblox.com/markets/BTC');
     expect(deps.appendAlertRecord).toHaveBeenCalledTimes(1);
 
     const line = deps.appendAlertRecord.mock.calls[0]![0];
@@ -76,7 +76,7 @@ describe('createAlertEmitter', () => {
       symbol: 'BTCUSDT',
       base: 'BTC',
       onBlox: true,
-      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+      tradeUrl: 'https://app.weareblox.com/markets/BTC',
     });
     expect(deps.onEmitted).toHaveBeenCalledTimes(1);
     expect(deps.onSuppressed).not.toHaveBeenCalled();
@@ -192,7 +192,7 @@ describe('createAlertEmitter', () => {
       base: 'BTC',
       tierPct: 10,
       onBlox: true,
-      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+      tradeUrl: 'https://app.weareblox.com/markets/BTC',
     });
 
     expect(deps.sendTelegram).toHaveBeenCalledTimes(1);

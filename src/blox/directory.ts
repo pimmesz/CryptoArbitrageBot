@@ -12,7 +12,17 @@ export interface BloxDirectoryOptions {
   fetchTimeoutMs?: number;
 }
 
-const BASE_BLOX_URL = 'https://weareblox.com/nl-nl/';
+/**
+ * Trade URLs point at the Blox web app (not the marketing site). This is a
+ * universal-link domain on iOS and an Android App Link, so taps on mobile
+ * open the Blox app directly on the coin's market page. The route is
+ * `/markets/{TICKER}` where TICKER is the uppercase short name (e.g. BTC).
+ *
+ * The marketing site `weareblox.com/nl-nl/{slug}` does NOT trigger app
+ * interception — it just opens the marketing page in the browser, which was
+ * the original "this link doesn't open the app" bug.
+ */
+const BLOX_APP_MARKET_URL = 'https://app.weareblox.com/markets/';
 
 /** Sanity floor — if the parser finds fewer entries than this we reject its output. */
 const MIN_PLAUSIBLE_ENTRIES = 50;
@@ -75,10 +85,18 @@ export class BloxDirectory {
     return this.map.get(ticker.toUpperCase()) ?? null;
   }
 
-  /** Blox web URL for this ticker, or null if not supported. Opens the Blox app via universal link on mobile. */
+  /**
+   * Blox web URL for this ticker, or null if not supported. Returns a
+   * universal link to the Blox app's market page so taps on mobile open
+   * directly to that coin's trading screen. The slug map is consulted only
+   * as the "is this supported on Blox" gate — the URL itself uses the
+   * ticker, since `app.weareblox.com/markets/:shortName` keys on the
+   * uppercase ticker, not the slug.
+   */
   getTradeUrl(ticker: string): string | null {
-    const slug = this.getSlug(ticker);
-    return slug ? BASE_BLOX_URL + slug : null;
+    const upper = ticker.toUpperCase();
+    if (!this.map.has(upper)) return null;
+    return BLOX_APP_MARKET_URL + upper;
   }
 
   private async refreshSafely(reason: 'initial' | 'scheduled'): Promise<void> {

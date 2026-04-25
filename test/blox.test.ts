@@ -106,8 +106,12 @@ describe('BloxDirectory', () => {
       logger: silentLogger,
       refreshIntervalMs: 0,
     });
-    expect(dir.getTradeUrl('BTC')).toBe('https://weareblox.com/nl-nl/bitcoin');
-    expect(dir.getTradeUrl('ETH')).toBe('https://weareblox.com/nl-nl/ethereum');
+    // Universal-link URLs that open the Blox app directly to the coin's
+    // market page on mobile (and the same page in-browser on desktop).
+    expect(dir.getTradeUrl('BTC')).toBe('https://app.weareblox.com/markets/BTC');
+    expect(dir.getTradeUrl('ETH')).toBe('https://app.weareblox.com/markets/ETH');
+    // Lowercase input still produces the canonical uppercase ticker URL.
+    expect(dir.getTradeUrl('btc')).toBe('https://app.weareblox.com/markets/BTC');
     expect(dir.getTradeUrl('TOTALLYNOTACOIN')).toBeNull();
   });
 
