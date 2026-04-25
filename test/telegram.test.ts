@@ -54,7 +54,7 @@ describe('createTelegramSender', () => {
     expect(send.consecutiveFailures()).toBe(1);
   });
 
-  it('raises a single outage_suspected error after N consecutive failures and clears on success', async () => {
+  it('raises a single outage_suspected error after N consecutive failures and clears on sustained recovery', async () => {
     const logger = makeLogger();
     const responses = [
       errorResponse(502),
@@ -72,6 +72,7 @@ describe('createTelegramSender', () => {
       logger,
       fetchImpl,
       failureAlarmThreshold: 3,
+      recoverySuccessThreshold: 1, // simplest shape for this test
     });
 
     for (let i = 0; i < 6; i++) {
@@ -85,6 +86,56 @@ describe('createTelegramSender', () => {
     expect(send.consecutiveFailures()).toBe(0);
     const recovered = logger.events.filter((e) => e.msg === 'telegram.outage_recovered');
     expect(recovered).toHaveLength(1);
+  });
+
+  it('requires a run of consecutive successes to clear the alarm — a single success does not', async () => {
+    const logger = makeLogger();
+    // 3 fails → alarm raised. Then success/fail/success/success/success pattern:
+    //   success #1 (alarm still raised — needs 3 in a row)
+    //   fail     (recovery run reset)
+    //   success #1 (alarm still raised)
+    //   success #2 (alarm still raised)
+    //   success #3 (alarm clears)
+    const responses = [
+      errorResponse(502),
+      errorResponse(502),
+      errorResponse(502),
+      okResponse(),
+      errorResponse(502),
+      okResponse(),
+      okResponse(),
+      okResponse(),
+    ];
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() => Promise.resolve(responses.shift()!));
+    const send = createTelegramSender({
+      botToken: 'T',
+      chatId: 'C',
+      logger,
+      fetchImpl,
+      failureAlarmThreshold: 3,
+      recoverySuccessThreshold: 3,
+    });
+
+    // 3 failures trip the alarm
+    for (let i = 0; i < 3; i++) {
+      await expect(send('x')).rejects.toThrow();
+    }
+    expect(logger.events.filter((e) => e.msg === 'telegram.outage_suspected')).toHaveLength(1);
+
+    // Single success does not clear it
+    await send('y');
+    expect(logger.events.filter((e) => e.msg === 'telegram.outage_recovered')).toHaveLength(0);
+
+    // A failure in the middle resets the recovery run
+    await expect(send('x')).rejects.toThrow();
+
+    // Three successes in a row finally clears the alarm
+    await send('y');
+    await send('y');
+    await send('y');
+    expect(logger.events.filter((e) => e.msg === 'telegram.outage_recovered')).toHaveLength(1);
   });
 
   it('spaces out calls when rateLimitPerSec is set', async () => {
@@ -133,5 +184,50 @@ describe('formatAlertMessage', () => {
       tradeUrl: 'http://example',
     });
     expect(msg.split('\n')[0]).toBe('🚀 XUSDT +2.00% in 1s');
+  });
+
+  it('renders escalation alerts with 📈, the tier label, and "since first alert"', () => {
+    const msg = formatAlertMessage({
+      kind: 'escalation',
+      symbol: 'BTCUSDT',
+      fromPrice: 100,
+      toPrice: 112,
+      changePct: 12.0,
+      tierPct: 10,
+      // 4 minutes 30 seconds since the initial alert
+      elapsedMs: 4 * 60_000 + 30_000,
+      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+    });
+    const lines = msg.split('\n');
+    expect(lines[0]).toBe('📈 BTCUSDT now +12.00% (passed +10%)');
+    expect(lines[1]).toContain('→');
+    expect(lines[1]).toContain('4 min 30s since first alert');
+    expect(lines[2]).toBe('https://weareblox.com/nl-nl/bitcoin');
+  });
+
+  it('uses second-only elapsed for sub-minute escalations and clean minutes for whole-minute deltas', () => {
+    const subMin = formatAlertMessage({
+      kind: 'escalation',
+      symbol: 'XUSDT',
+      fromPrice: 1,
+      toPrice: 1.05,
+      changePct: 5,
+      tierPct: 5,
+      elapsedMs: 45_000,
+      tradeUrl: 'http://example',
+    });
+    expect(subMin.split('\n')[1]).toContain('45s since first alert');
+
+    const whole = formatAlertMessage({
+      kind: 'escalation',
+      symbol: 'XUSDT',
+      fromPrice: 1,
+      toPrice: 1.1,
+      changePct: 10,
+      tierPct: 10,
+      elapsedMs: 3 * 60_000,
+      tradeUrl: 'http://example',
+    });
+    expect(whole.split('\n')[1]).toContain('3 min since first alert');
   });
 });

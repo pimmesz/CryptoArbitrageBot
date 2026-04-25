@@ -27,6 +27,17 @@ export interface Config {
   telegramRateLimitPerSec: number;
   /** WS silence watchdog timeout, in seconds. Default 30. */
   silenceTimeoutSeconds: number;
+  /**
+   * Tiers (in %, measured from the initial alert's fromPrice) at which to
+   * emit follow-up "escalation" alerts while a pump is active. Empty = no
+   * escalation alerts. Default `[5, 10, 20, 50]`.
+   */
+  escalationTiersPct: number[];
+  /**
+   * How long after an initial alert we keep watching for escalation
+   * crossings, in minutes. 0 = escalation disabled. Default 15.
+   */
+  escalationWindowMinutes: number;
 }
 
 class ConfigError extends Error {
@@ -101,8 +112,49 @@ export function loadConfig(): Config {
       (n) => n >= 5 && n <= 600,
       'must be between 5 and 600',
     ),
+    escalationTiersPct: parseEscalationTiers(process.env.ESCALATION_TIERS_PCT),
+    escalationWindowMinutes: optionalNumber(
+      'ESCALATION_WINDOW_MINUTES',
+      15,
+      (n) => n >= 0 && n <= 240,
+      'must be between 0 and 240',
+    ),
   };
   return cfg;
+}
+
+/**
+ * Parse the comma-separated ESCALATION_TIERS_PCT env value into a sorted,
+ * deduplicated list of positive numbers. Empty / unset → defaults to
+ * [5, 10, 20, 50]. Explicit empty string ('') disables escalation.
+ */
+function parseEscalationTiers(raw: string | undefined): number[] {
+  if (raw === undefined) return [5, 10, 20, 50];
+  const trimmed = raw.trim();
+  // An explicit empty string is a valid way to opt out. Any other input
+  // must parse cleanly — we don't silently fall back to defaults if the
+  // value is malformed, that's how prod ends up running on stale config.
+  if (trimmed === '') return [];
+  const parts = trimmed
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const tiers: number[] = [];
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isFinite(n)) {
+      throw new ConfigError(
+        `ESCALATION_TIERS_PCT entry "${p}" is not a number (raw="${raw}")`,
+      );
+    }
+    if (n <= 0) {
+      throw new ConfigError(
+        `ESCALATION_TIERS_PCT entries must be > 0 (got ${n})`,
+      );
+    }
+    tiers.push(n);
+  }
+  return Array.from(new Set(tiers)).sort((a, b) => a - b);
 }
 
 function optionalNumber(

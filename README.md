@@ -15,6 +15,12 @@ No trading, no API keys, no money at risk. Pure market-data-in, Telegram-message
 - Keeps a rolling 60-second price buffer per symbol and fires an alert when the
   current price is ≥ 2% above the minimum price in that window.
 - Enforces a 15-minute per-symbol cooldown so a single pump doesn't spam the channel.
+- Emits **escalation alerts** while a pump is still active. After the initial 2% alert,
+  the bot keeps watching that symbol for 15 minutes and sends a follow-up message each
+  time the price crosses one of the configured tiers (default `+5% / +10% / +20% / +50%`
+  above the initial alert's `fromPrice`). Each tier fires at most once per pump; the
+  series ends when the top tier fires or the window expires. This is the fix for the
+  "+2% alert then radio silence even as the coin rips to +10%" problem.
 - Cross-checks each alert against the coins available on
   [Blox](https://weareblox.com/). **Only** alerts whose asset is tradeable on
   Blox get forwarded to Telegram; the link in the message points at the Blox
@@ -28,9 +34,19 @@ No trading, no API keys, no money at risk. Pure market-data-in, Telegram-message
 
 ## Telegram alert format
 
+Initial alert:
+
 ```
 🚀 BTCUSDT +2.34% in 58s
 67420.15 → 69000.00
+https://weareblox.com/nl-nl/bitcoin
+```
+
+Escalation alert (same pump, price has since crossed the +10% tier):
+
+```
+📈 BTCUSDT now +11.20% (passed +10%)
+67420.15 → 74972.00 (4 min 30s since first alert)
 https://weareblox.com/nl-nl/bitcoin
 ```
 
@@ -57,6 +73,9 @@ the `.env` file itself is gitignored.
 | `MIN_ELAPSED_SECONDS` | Minimum elapsed time between the window's min price and the firing tick. Default `0`. |
 | `TELEGRAM_RATE_LIMIT_PER_SEC` | Max Telegram messages/sec (Telegram's chat limit is 30/s). Default `20`. |
 | `SILENCE_TIMEOUT_SECONDS` | WS silence watchdog: reconnect if no ticks arrive in this window. Default `30`. |
+| `BINANCE_WS_URL`      | Optional override for the Binance WS endpoint. Leave unset outside of tests. |
+| `ESCALATION_TIERS_PCT` | Comma-separated tiers (in %) for escalation follow-up alerts. Default `5,10,20,50`. Empty value disables escalations. |
+| `ESCALATION_WINDOW_MINUTES` | How long after the initial alert to keep watching for escalations. Default `15`. `0` disables escalations. Range `0–240`. |
 
 Invalid or missing values cause the process to fail fast on startup with a
 clear error.

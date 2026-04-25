@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAlertEmitter } from '../src/alert-emitter';
-import type { PumpAlert } from '../src/detector';
+import type { EscalationAlert, PumpAlert } from '../src/detector';
 import type { Logger } from '../src/logger';
 
 const silentLogger: Logger = {
@@ -12,6 +12,7 @@ const silentLogger: Logger = {
 
 function makeAlert(over: Partial<PumpAlert> = {}): PumpAlert {
   return {
+    kind: 'initial',
     symbol: 'BTCUSDT',
     fromPrice: 100,
     toPrice: 102,
@@ -22,10 +23,29 @@ function makeAlert(over: Partial<PumpAlert> = {}): PumpAlert {
   };
 }
 
+function makeEscalationAlert(over: Partial<EscalationAlert> = {}): EscalationAlert {
+  return {
+    kind: 'escalation',
+    symbol: 'BTCUSDT',
+    fromPrice: 100,
+    toPrice: 105,
+    changePct: 5,
+    tierPct: 5,
+    elapsedMs: 90_000,
+    ts: Date.UTC(2026, 3, 21, 12, 1, 30),
+    ...over,
+  };
+}
+
 function makeDeps(bloxMap: Record<string, string>) {
   const sendTelegram = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
   const appendAlertRecord = vi.fn<(line: string) => Promise<void>>().mockResolvedValue(undefined);
-  const formatAlertMessage = vi.fn((a: { symbol: string; tradeUrl: string }) => `msg for ${a.symbol} @ ${a.tradeUrl}`);
+  const formatAlertMessage = vi.fn(
+    (a: { kind: 'initial' | 'escalation'; symbol: string; tradeUrl: string; tierPct?: number }) =>
+      a.kind === 'escalation'
+        ? `escalation msg for ${a.symbol} tier=${a.tierPct} @ ${a.tradeUrl}`
+        : `msg for ${a.symbol} @ ${a.tradeUrl}`,
+  );
   const blox = {
     getTradeUrl: (t: string) => (bloxMap[t] ? `https://weareblox.com/nl-nl/${bloxMap[t]}` : null),
   };
@@ -133,5 +153,70 @@ describe('createAlertEmitter', () => {
     });
 
     expect(() => emit(makeAlert())).not.toThrow();
+  });
+
+  it('writes kind=initial in the JSONL record for initial alerts', () => {
+    const deps = makeDeps({ BTC: 'bitcoin' });
+    const emit = createAlertEmitter({
+      ...deps,
+      quoteCurrency: 'USDT',
+      logger: silentLogger,
+    });
+
+    emit(makeAlert());
+    const record = JSON.parse(deps.appendAlertRecord.mock.calls[0]![0]);
+    expect(record.kind).toBe('initial');
+    // No tierPct on initial alerts.
+    expect(record.tierPct).toBeUndefined();
+  });
+
+  it('routes escalation alerts through the escalation telegram format and JSONL kind', () => {
+    const deps = makeDeps({ BTC: 'bitcoin' });
+    const emit = createAlertEmitter({
+      ...deps,
+      quoteCurrency: 'USDT',
+      logger: silentLogger,
+    });
+
+    emit(makeEscalationAlert({ tierPct: 10, changePct: 11.2, toPrice: 111.2 }));
+
+    expect(deps.formatAlertMessage).toHaveBeenCalledTimes(1);
+    const [arg] = deps.formatAlertMessage.mock.calls[0]!;
+    expect(arg.kind).toBe('escalation');
+    expect(arg.tierPct).toBe(10);
+
+    const record = JSON.parse(deps.appendAlertRecord.mock.calls[0]![0]);
+    expect(record).toMatchObject({
+      kind: 'escalation',
+      symbol: 'BTCUSDT',
+      base: 'BTC',
+      tierPct: 10,
+      onBlox: true,
+      tradeUrl: 'https://weareblox.com/nl-nl/bitcoin',
+    });
+
+    expect(deps.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(deps.sendTelegram.mock.calls[0]![0]).toContain('escalation msg');
+    expect(deps.onEmitted).toHaveBeenCalledTimes(1);
+    expect(deps.onEmitted.mock.calls[0]![0]).toMatchObject({ kind: 'escalation' });
+  });
+
+  it('still suppresses Telegram when an escalation symbol is not on Blox', () => {
+    const deps = makeDeps({}); // empty
+    const emit = createAlertEmitter({
+      ...deps,
+      quoteCurrency: 'USDT',
+      logger: silentLogger,
+    });
+
+    emit(makeEscalationAlert({ symbol: 'NOTREALUSDT' }));
+
+    expect(deps.sendTelegram).not.toHaveBeenCalled();
+    expect(deps.appendAlertRecord).toHaveBeenCalledTimes(1);
+    const record = JSON.parse(deps.appendAlertRecord.mock.calls[0]![0]);
+    expect(record.kind).toBe('escalation');
+    expect(record.onBlox).toBe(false);
+    expect(deps.onSuppressed).toHaveBeenCalledTimes(1);
+    expect(deps.onSuppressed.mock.calls[0]![0]).toMatchObject({ kind: 'escalation' });
   });
 });

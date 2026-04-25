@@ -173,4 +173,180 @@ describe('PumpDetector', () => {
       expect(d.observe('DOWNUSDT', 80, now)).toBeNull(); // -20% is not a pump
     });
   });
+
+  describe('escalation alerts', () => {
+    /**
+     * The escalation feature: after an initial 2% alert, we keep watching
+     * the symbol for tier-crossings (5/10/20/50% above the initial
+     * fromPrice) for a fixed window (default 15 min) and emit follow-up
+     * alerts so the user isn't silenced through the bulk of the move.
+     */
+    const escalationOpts = {
+      ...baseOpts,
+      cooldownMs: 15 * 60_000,
+      escalationTiersPct: [5, 10, 20, 50],
+      escalationWindowMs: 15 * 60_000,
+    };
+
+    it('marks the initial alert with kind=initial', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      const alert = d.observe('BTCUSDT', 102, now);
+      expect(alert?.kind).toBe('initial');
+      expect(d.hasActivePump('BTCUSDT')).toBe(true);
+    });
+
+    it('fires an escalation alert at +5% during cooldown', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      const initial = d.observe('BTCUSDT', 102, now);
+      expect(initial?.kind).toBe('initial');
+
+      // Climbs to +5% — escalation should fire even though we're in cooldown.
+      now += 30_000;
+      const esc = d.observe('BTCUSDT', 105, now);
+      expect(esc).not.toBeNull();
+      expect(esc?.kind).toBe('escalation');
+      if (esc?.kind !== 'escalation') throw new Error('unreachable');
+      expect(esc.tierPct).toBe(5);
+      expect(esc.fromPrice).toBe(100); // reference is the initial fromPrice
+      expect(esc.toPrice).toBe(105);
+      expect(esc.changePct).toBeCloseTo(5, 6);
+      expect(esc.elapsedMs).toBe(30_000); // since the initial alert
+      expect(d.isOnCooldown('BTCUSDT', now)).toBe(true);
+    });
+
+    it('does not fire the same tier twice', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now); // initial
+
+      now += 10_000;
+      const first = d.observe('BTCUSDT', 105, now); // +5%
+      expect(first?.kind).toBe('escalation');
+
+      now += 1000;
+      const dup = d.observe('BTCUSDT', 105.5, now); // still in 5% tier
+      expect(dup).toBeNull();
+    });
+
+    it('fires only the highest tier when a single tick crosses several', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now); // initial @ from=100
+
+      // Single tick from +2% to +25% — should fire only the 20% tier.
+      now += 30_000;
+      const esc = d.observe('BTCUSDT', 125, now);
+      expect(esc?.kind).toBe('escalation');
+      if (esc?.kind !== 'escalation') throw new Error('unreachable');
+      expect(esc.tierPct).toBe(20);
+
+      // A subsequent tick at +30% must not re-fire 5/10 tiers — they are
+      // marked as already-fired alongside 20%.
+      now += 1000;
+      const next = d.observe('BTCUSDT', 130, now);
+      expect(next).toBeNull();
+    });
+
+    it('ends the active-pump series when the top tier fires', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now);
+      expect(d.hasActivePump('BTCUSDT')).toBe(true);
+
+      now += 60_000;
+      const esc = d.observe('BTCUSDT', 160, now); // +60% → top tier (50%) fires
+      expect(esc?.kind).toBe('escalation');
+      if (esc?.kind !== 'escalation') throw new Error('unreachable');
+      expect(esc.tierPct).toBe(50);
+      expect(d.hasActivePump('BTCUSDT')).toBe(false);
+
+      // No further escalation alerts even if it keeps climbing.
+      now += 1000;
+      expect(d.observe('BTCUSDT', 200, now)).toBeNull();
+    });
+
+    it('expires the active-pump series after the escalation window', () => {
+      const d = new PumpDetector({ ...escalationOpts, escalationWindowMs: 60_000 });
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now);
+      expect(d.hasActivePump('BTCUSDT')).toBe(true);
+
+      now += 70_000; // past the escalation window
+      const esc = d.observe('BTCUSDT', 110, now); // would be +10% if window were open
+      expect(esc).toBeNull();
+      expect(d.hasActivePump('BTCUSDT')).toBe(false);
+    });
+
+    it('does not fire escalation when price has fallen back below fromPrice', () => {
+      const d = new PumpDetector(escalationOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now);
+
+      now += 10_000;
+      // Pump fizzled — we shouldn't crash or fire an escalation. Series
+      // stays open in case price recovers within the window.
+      const esc = d.observe('BTCUSDT', 95, now);
+      expect(esc).toBeNull();
+      expect(d.hasActivePump('BTCUSDT')).toBe(true);
+    });
+
+    it('does nothing extra when escalation is disabled (default)', () => {
+      const d = new PumpDetector(baseOpts);
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      const initial = d.observe('BTCUSDT', 102, now);
+      expect(initial?.kind).toBe('initial');
+      expect(d.hasActivePump('BTCUSDT')).toBe(false);
+
+      now += 30_000;
+      // No escalation tiers configured → cooldown gates everything.
+      expect(d.observe('BTCUSDT', 110, now)).toBeNull();
+    });
+
+    it('rejects negative or zero tier values in the constructor', () => {
+      expect(
+        () =>
+          new PumpDetector({ ...baseOpts, escalationTiersPct: [5, 0, 10], escalationWindowMs: 1000 }),
+      ).toThrow(/escalationTiersPct/);
+      expect(
+        () =>
+          new PumpDetector({ ...baseOpts, escalationTiersPct: [-5], escalationWindowMs: 1000 }),
+      ).toThrow(/escalationTiersPct/);
+    });
+
+    it('normalises tiers (sort + dedupe) so callers do not have to', () => {
+      const d = new PumpDetector({
+        ...baseOpts,
+        escalationTiersPct: [10, 5, 10, 50, 20],
+        escalationWindowMs: 60_000,
+      });
+      let now = 1_000_000;
+      d.observe('BTCUSDT', 100, now);
+      now += 1000;
+      d.observe('BTCUSDT', 102, now);
+
+      now += 5000;
+      const esc = d.observe('BTCUSDT', 105.1, now); // +5.1% → tier 5
+      expect(esc?.kind).toBe('escalation');
+      if (esc?.kind !== 'escalation') throw new Error('unreachable');
+      expect(esc.tierPct).toBe(5);
+    });
+  });
 });

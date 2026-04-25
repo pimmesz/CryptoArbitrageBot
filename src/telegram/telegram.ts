@@ -11,9 +11,16 @@ export interface TelegramSenderOptions {
   rateLimitPerSec?: number;
   /**
    * After this many consecutive send failures we bump the log level to
-   * error so ops see a sustained Telegram outage. Default 5.
+   * error so ops see a sustained Telegram outage. Default 5. Must be > 0.
    */
   failureAlarmThreshold?: number;
+  /**
+   * Once an outage alarm has been raised, require this many consecutive
+   * successes before we declare recovery. This guards against flaky
+   * partial-outage scenarios where a single success resolving inbetween
+   * failing sends would otherwise ping-pong the alarm. Default 3.
+   */
+  recoverySuccessThreshold?: number;
   /** Overridable for tests. Defaults to fetch + setTimeout. */
   fetchImpl?: typeof fetch;
   nowMs?: () => number;
@@ -43,9 +50,17 @@ export function createTelegramSender(opts: TelegramSenderOptions) {
     : 0;
 
   const failureThreshold = opts.failureAlarmThreshold ?? 5;
+  if (failureThreshold <= 0) {
+    throw new Error('failureAlarmThreshold must be > 0');
+  }
+  const recoveryThreshold = opts.recoverySuccessThreshold ?? 3;
+  if (recoveryThreshold <= 0) {
+    throw new Error('recoverySuccessThreshold must be > 0');
+  }
 
   let nextSlotTs = 0;
   let consecutiveFailures = 0;
+  let consecutiveSuccesses = 0;
   let alarmRaised = false;
 
   /** Wait until we're within the rate-limit schedule, then claim the slot. */
@@ -63,6 +78,8 @@ export function createTelegramSender(opts: TelegramSenderOptions) {
 
   function onSendFailure(): void {
     consecutiveFailures++;
+    // Any failure resets the recovery run — we need N successes IN A ROW.
+    consecutiveSuccesses = 0;
     if (!alarmRaised && consecutiveFailures >= failureThreshold) {
       alarmRaised = true;
       opts.logger.error('telegram.outage_suspected', {
@@ -72,13 +89,24 @@ export function createTelegramSender(opts: TelegramSenderOptions) {
   }
 
   function onSendSuccess(): void {
-    if (alarmRaised) {
+    consecutiveSuccesses++;
+    // When the alarm isn't raised, any success immediately zeroes the
+    // failure counter — same as before. When the alarm IS raised, only a
+    // run of `recoveryThreshold` consecutive successes clears it, so a
+    // lucky retry landing between failing sends can't silence the alarm.
+    if (!alarmRaised) {
+      consecutiveFailures = 0;
+      return;
+    }
+    if (consecutiveSuccesses >= recoveryThreshold) {
       opts.logger.info('telegram.outage_recovered', {
         afterFailures: consecutiveFailures,
+        consecutiveSuccesses,
       });
+      consecutiveFailures = 0;
+      consecutiveSuccesses = 0;
+      alarmRaised = false;
     }
-    consecutiveFailures = 0;
-    alarmRaised = false;
   }
 
   async function sendMessage(text: string): Promise<void> {
@@ -130,22 +158,57 @@ interface SenderWithStats {
 
 export type TelegramSender = ReturnType<typeof createTelegramSender>;
 
-/** Format a pump alert for Telegram. Plain text — no MarkdownV2 escaping pain. */
+/**
+ * Format an alert for Telegram. Plain text — no MarkdownV2 escaping pain.
+ *
+ * Two flavours, distinguished by the `kind` field:
+ *  - 'initial'    — first-time threshold trip. 🚀 with seconds since min.
+ *  - 'escalation' — follow-up while a pump is active. 📈 with the tier
+ *                    label so the reader sees "this is the +5% checkpoint
+ *                    of the same pump", not a brand-new alert.
+ *
+ * When `kind` is omitted, formatter falls back to the 'initial' shape so
+ * older callers that still pass a bare alert keep working.
+ */
 export function formatAlertMessage(alert: {
+  kind?: 'initial' | 'escalation';
   symbol: string;
   fromPrice: number;
   toPrice: number;
   changePct: number;
   elapsedMs: number;
+  /** Only meaningful when kind === 'escalation'. */
+  tierPct?: number;
   /** URL that opens the coin's Blox trading page (taps into the app via universal link on mobile). */
   tradeUrl: string;
 }): string {
   const seconds = Math.max(1, Math.round(alert.elapsedMs / 1000));
+  if (alert.kind === 'escalation' && alert.tierPct !== undefined) {
+    const elapsedLabel = formatElapsed(alert.elapsedMs);
+    return [
+      `📈 ${alert.symbol} now +${alert.changePct.toFixed(2)}% (passed +${alert.tierPct}%)`,
+      `${formatPrice(alert.fromPrice)} → ${formatPrice(alert.toPrice)} (${elapsedLabel} since first alert)`,
+      alert.tradeUrl,
+    ].join('\n');
+  }
   return [
     `🚀 ${alert.symbol} +${alert.changePct.toFixed(2)}% in ${seconds}s`,
     `${formatPrice(alert.fromPrice)} → ${formatPrice(alert.toPrice)}`,
     alert.tradeUrl,
   ].join('\n');
+}
+
+/**
+ * Render an elapsed-since-initial-alert label as "Ns" / "N min Ms" / "N min".
+ * Escalations are typically minutes-out, where seconds-only would feel clunky.
+ */
+function formatElapsed(ms: number): string {
+  const totalSec = Math.max(1, Math.round(ms / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (sec === 0) return `${min} min`;
+  return `${min} min ${sec}s`;
 }
 
 function formatPrice(p: number): string {

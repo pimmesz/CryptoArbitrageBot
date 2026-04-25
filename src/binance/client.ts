@@ -132,9 +132,20 @@ export class BinanceMiniTickerClient {
   }
 
   private handleMessage(data: RawData): void {
+    // `ws` can deliver Buffer | ArrayBuffer | Buffer[] depending on framing.
+    // Normalise to a single utf-8 string before parsing so fragmented frames
+    // don't silently fail JSON.parse.
+    let text: string;
+    try {
+      text = rawToUtf8(data);
+    } catch (err) {
+      this.opts.logger.warn('ws.bad_frame', { error: (err as Error).message });
+      return;
+    }
+
     let parsed: unknown;
     try {
-      parsed = JSON.parse(data.toString('utf8'));
+      parsed = JSON.parse(text);
     } catch (err) {
       this.opts.logger.warn('ws.bad_json', { error: (err as Error).message });
       return;
@@ -211,9 +222,20 @@ function isMiniTicker(x: unknown): x is MiniTicker {
   if (typeof x !== 'object' || x === null) return false;
   const o = x as Record<string, unknown>;
   return (
-    typeof o.e === 'string' &&
+    // Strict event-type match: if Binance ever multiplexes a different
+    // event onto this stream URL, drop it rather than silently mishandle.
+    o.e === '24hrMiniTicker' &&
     typeof o.s === 'string' &&
     typeof o.c === 'string' &&
     typeof o.E === 'number'
   );
+}
+
+/** Normalise a ws `RawData` payload to a utf-8 string. */
+function rawToUtf8(data: RawData): string {
+  if (typeof data === 'string') return data;
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+  throw new Error('unknown ws frame type');
 }

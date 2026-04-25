@@ -9,7 +9,15 @@ import { BloxDirectory } from './blox';
 import { createAlertEmitter } from './alert-emitter';
 
 const DEFAULT_BINANCE_STREAM_URL = 'wss://stream.binance.com:9443/ws/!miniTicker@arr';
-const ALERTS_FILE = path.resolve(process.cwd(), 'data', 'alerts.jsonl');
+// Anchor the data dir to the compiled file location (dist/ at runtime) rather
+// than process.cwd(). PM2 respects cwd today but this decouples us from that
+// assumption — launching the bot from any directory now writes to the same
+// spot next to the code.
+const DATA_DIR = path.resolve(__dirname, '..', 'data');
+const ALERTS_FILE = path.join(DATA_DIR, 'alerts.jsonl');
+
+/** How long to wait on shutdown for pending appends/fetches to drain. */
+const SHUTDOWN_DRAIN_MS = 2_000;
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -25,12 +33,14 @@ async function main(): Promise<void> {
     bloxRefreshHours: cfg.bloxRefreshHours,
     telegramRateLimitPerSec: cfg.telegramRateLimitPerSec,
     silenceTimeoutSeconds: cfg.silenceTimeoutSeconds,
+    escalationTiersPct: cfg.escalationTiersPct,
+    escalationWindowMinutes: cfg.escalationWindowMinutes,
     nodeVersion: process.version,
   });
 
   // Ensure data/ exists so alerts.jsonl writes don't fail.
   try {
-    fs.mkdirSync(path.dirname(ALERTS_FILE), { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
   } catch (err) {
     logger.error('bootstrap.mkdir_failed', { error: (err as Error).message });
     process.exit(1);
@@ -43,6 +53,8 @@ async function main(): Promise<void> {
     // ~1 tick/s × 60s = 60 entries; cap at 2x headroom to stay safe.
     maxBufferEntries: 120,
     minElapsedMs: cfg.minElapsedSeconds * 1_000,
+    escalationTiersPct: cfg.escalationTiersPct,
+    escalationWindowMs: cfg.escalationWindowMinutes * 60_000,
   });
 
   const sendTelegram = createTelegramSender({
@@ -66,10 +78,19 @@ async function main(): Promise<void> {
   // Counters for the heartbeat; reset every tick.
   let ticksSinceHeartbeat = 0;
   let alertsSinceHeartbeat = 0;
+  let escalationsSinceHeartbeat = 0;
   let suppressedSinceHeartbeat = 0;
 
-  const appendAlertRecord = (line: string): Promise<void> =>
-    fs.promises.appendFile(ALERTS_FILE, line, 'utf8');
+  // Track in-flight alert appends so graceful shutdown can wait for them to
+  // flush before the process exits. Without this, PM2 restarts can silently
+  // drop the last line of alerts.jsonl.
+  let pendingAppends = 0;
+  const appendAlertRecord = (line: string): Promise<void> => {
+    pendingAppends++;
+    return fs.promises.appendFile(ALERTS_FILE, line, 'utf8').finally(() => {
+      pendingAppends--;
+    });
+  };
 
   const emitAlert = createAlertEmitter({
     blox,
@@ -78,8 +99,9 @@ async function main(): Promise<void> {
     formatAlertMessage,
     appendAlertRecord,
     logger,
-    onEmitted: () => {
-      alertsSinceHeartbeat++;
+    onEmitted: (alert) => {
+      if (alert.kind === 'escalation') escalationsSinceHeartbeat++;
+      else alertsSinceHeartbeat++;
     },
     onSuppressed: () => {
       suppressedSinceHeartbeat++;
@@ -90,14 +112,17 @@ async function main(): Promise<void> {
   const heartbeat = setInterval(() => {
     logger.info('heartbeat', {
       trackedSymbols: detector.trackedSymbols(),
+      activePumps: detector.activePumpCount(),
       ticksLast60s: ticksSinceHeartbeat,
       bloxCoins: blox.size(),
       alertsLast60s: alertsSinceHeartbeat,
+      escalationsLast60s: escalationsSinceHeartbeat,
       suppressedLast60s: suppressedSinceHeartbeat,
       telegramConsecutiveFailures: sendTelegram.consecutiveFailures(),
     });
     ticksSinceHeartbeat = 0;
     alertsSinceHeartbeat = 0;
+    escalationsSinceHeartbeat = 0;
     suppressedSinceHeartbeat = 0;
   }, 60_000);
   heartbeat.unref();
@@ -145,19 +170,30 @@ async function main(): Promise<void> {
     process.exit(1);
   });
 
-  process.on('SIGTERM', () => {
-    logger.info('shutdown', { signal: 'SIGTERM' });
+  let shuttingDown = false;
+  async function gracefulShutdown(signal: string): Promise<void> {
+    if (shuttingDown) return; // second signal — ignore, we're already on it
+    shuttingDown = true;
+    logger.info('shutdown', { signal, pendingAppends });
+    clearInterval(heartbeat);
     blox.stop();
     client.stop();
-    process.exit(0);
-  });
 
-  process.on('SIGINT', () => {
-    logger.info('shutdown', { signal: 'SIGINT' });
-    blox.stop();
-    client.stop();
+    // Give in-flight appends and fetches a chance to flush. We cap the wait
+    // at SHUTDOWN_DRAIN_MS so PM2 doesn't force-kill us after its own
+    // timeout; whatever hasn't drained by then is lost.
+    const deadline = Date.now() + SHUTDOWN_DRAIN_MS;
+    while (pendingAppends > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (pendingAppends > 0) {
+      logger.warn('shutdown.drain_timeout', { pendingAppends });
+    }
     process.exit(0);
-  });
+  }
+
+  process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
 
   client.start();
 }
